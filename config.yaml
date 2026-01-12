@@ -1,0 +1,144 @@
+# Multi-Cancer AI Early Detection Platform Configuration
+
+# Model Configuration
+model:
+  backbone: "resnet50"  # Options: resnet50, efficientnet_b4, densenet121
+  pretrained: true
+  freeze_backbone: true
+  num_classes_per_cancer: 2  # Binary classification (benign/malignant)
+
+  # Architecture Parameters
+  input_size: [224, 224]  # Standard medical imaging size
+  dropout_rate: 0.3
+  use_segmentation_head: false  # Enable for tumor localization
+
+# Cancer Types Configuration
+cancer_types:
+  - name: "lung"
+    modality: "CT"
+    dataset_name: "LIDC-IDRI"
+    classes: ["benign", "malignant"]
+    description: "Lung nodule detection from CT scans"
+
+  - name: "breast"
+    modality: "mammogram"
+    dataset_name: "CBIS-DDSM"
+    classes: ["benign", "malignant"]
+    description: "Breast cancer detection from mammograms"
+
+  # Future cancer types (to be added)
+  # - name: "brain"
+  # - name: "skin"
+  # - name: "cervical"
+  # - name: "colorectal"
+  # - name: "prostate"
+  # - name: "liver"
+
+# Training Configuration
+training:
+  batch_size: 32
+  num_epochs: 50
+  learning_rate: 1e-4
+  weight_decay: 1e-4
+
+  # Transfer Learning Strategy
+  progressive_unfreezing: true
+  unfreeze_layers: [4, 5]  # Layer indices to unfreeze
+
+  # Loss Configuration
+  use_weighted_loss: true
+  focal_loss_alpha: 0.25
+  focal_loss_gamma: 2.0
+
+  # Optimization
+  optimizer: "adam"  # Options: adam, sgd, adamw
+  scheduler: "cosine"  # Options: cosine, step, plateau
+
+  # Early Stopping
+  early_stopping_patience: 10
+  early_stopping_metric: "val_auc"  # Options: val_loss, val_auc, val_f1
+
+  # Cross-Validation
+  use_cross_validation: true
+  cv_folds: 5
+
+# Data Configuration
+data:
+  # Image Preprocessing
+  normalization_mean: [0.485, 0.456, 0.406]  # ImageNet means
+  normalization_std: [0.229, 0.224, 0.225]   # ImageNet stds
+
+  # Augmentation
+  augmentation:
+    rotation_range: 15
+    horizontal_flip: true
+    vertical_flip: false  # Usually false for medical images
+    brightness_contrast: 0.1
+    gaussian_noise: 0.05
+
+  # Data Splitting
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+
+  # Class Imbalance Handling
+  use_class_weights: true
+  use_smote: false  # Can be computationally expensive
+
+# Explainable AI Configuration
+xai:
+  # Grad-CAM Parameters
+  grad_cam_layer: "layer4"  # Target layer for Grad-CAM
+  grad_cam_target_class: "malignant"
+
+  # Saliency Parameters
+  saliency_method: "guided_backprop"  # Options: vanilla, guided_backprop, integrated_gradients
+
+  # Explanation Generation
+  generate_text_explanations: true
+  confidence_threshold: 0.5
+
+# Evaluation Configuration
+evaluation:
+  # Clinical Metrics
+  primary_metric: "sensitivity"  # Focus on sensitivity for early detection
+  secondary_metrics: ["specificity", "auc", "f1_score"]
+
+  # Threshold Optimization
+  optimize_threshold: true
+  threshold_range: [0.1, 0.9, 0.01]  # start, end, step
+
+  # Clinical Interpretation
+  risk_levels:
+    low: 0.3
+    medium: 0.6
+    high: 0.8
+
+# Inference Configuration
+inference:
+  batch_size: 16
+  use_tta: false  # Test-time augmentation
+  return_explanations: true
+  save_heatmaps: true
+
+# Logging and Monitoring
+logging:
+  level: "INFO"
+  save_training_logs: true
+  use_wandb: false
+  wandb_project_name: "multi-cancer-detection"
+
+# Paths Configuration
+paths:
+  raw_data: "data/raw"
+  processed_data: "data/processed"
+  splits: "data/splits"
+  models: "models"
+  logs: "logs"
+  results: "results"
+
+# Safety and Ethics
+safety:
+  disclaimer: "This AI system is assistive only. All predictions must be reviewed by qualified medical professionals."
+  confidence_threshold_warning: 0.3
+  bias_monitoring: true
