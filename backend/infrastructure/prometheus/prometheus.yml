@@ -1,0 +1,154 @@
+# Prometheus Configuration for Medical AI Platform
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+rule_files:
+  - "rules/medical_ai_rules.yml"
+  - "rules/alert_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # Medical AI Inference Service
+  - job_name: 'inference-service'
+    static_configs:
+      - targets: ['inference-service.medical-ai.svc.cluster.local:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'inference-service'
+      - source_labels: [__address__]
+        regex: '([^:]+):.+'
+        target_label: pod_name
+        replacement: '${1}'
+
+  # Training Service
+  - job_name: 'training-service'
+    static_configs:
+      - targets: ['training-service.medical-ai.svc.cluster.local:8001']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # XAI Service
+  - job_name: 'xai-service'
+    static_configs:
+      - targets: ['xai-service.medical-ai.svc.cluster.local:8002']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Metadata Service
+  - job_name: 'metadata-service'
+    static_configs:
+      - targets: ['metadata-service.medical-ai.svc.cluster.local:8003']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Auth Service
+  - job_name: 'auth-service'
+    static_configs:
+      - targets: ['auth-service.medical-ai.svc.cluster.local:8004']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Kong API Gateway
+  - job_name: 'kong-gateway'
+    static_configs:
+      - targets: ['kong-proxy.medical-ai.svc.cluster.local:8100']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # PostgreSQL Database
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres.medical-ai.svc.cluster.local:9187']
+    scrape_interval: 30s
+
+  # Redis Cache
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-master.medical-ai.svc.cluster.local:9121']
+    scrape_interval: 30s
+
+  # MinIO Object Storage
+  - job_name: 'minio'
+    static_configs:
+      - targets: ['minio.medical-ai.svc.cluster.local:9000']
+    metrics_path: '/minio/v2/metrics/cluster'
+    scrape_interval: 30s
+    params:
+      format: ['prometheus']
+
+  # Kubernetes Metrics
+  - job_name: 'kubernetes-apiserver'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  - job_name: 'kubernetes-nodes'
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: replace
+        target_label: app
+
+  # NVIDIA GPU Metrics (DCGM)
+  - job_name: 'nvidia-dcgm'
+    static_configs:
+      - targets: ['dcgm-exporter.medical-ai.svc.cluster.local:9400']
+    scrape_interval: 15s
+
+  # Node Exporter (System Metrics)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter.medical-ai.svc.cluster.local:9100']
+    scrape_interval: 30s
+
+  # Medical AI Custom Exporter
+  - job_name: 'medical-ai-exporter'
+    static_configs:
+      - targets: ['medical-ai-exporter.medical-ai.svc.cluster.local:8001']
+    scrape_interval: 60s

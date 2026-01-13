@@ -1,0 +1,163 @@
+groups:
+  - name: medical_ai_inference
+    rules:
+      # High error rate alert
+      - alert: HighInferenceErrorRate
+        expr: rate(inference_requests_total{status="error"}[5m]) / rate(inference_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          service: inference
+        annotations:
+          summary: "High inference error rate detected"
+          description: "Inference error rate is {{ $value | printf \"%.2f\" }}% (threshold: 5%)"
+          runbook_url: "https://docs.medical-ai.com/runbooks/inference-errors"
+
+      # Low accuracy alert
+      - alert: LowModelAccuracy
+        expr: inference_model_accuracy < 0.85
+        for: 10m
+        labels:
+          severity: warning
+          service: inference
+        annotations:
+          summary: "Model accuracy below threshold"
+          description: "Model accuracy is {{ $value | printf \"%.2f\" }}% (threshold: 85%)"
+
+      # High GPU utilization
+      - alert: HighGPUUtilization
+        expr: DCGM_FI_DEV_GPU_UTIL > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: gpu
+        annotations:
+          summary: "High GPU utilization detected"
+          description: "GPU utilization is {{ $value }}% on device {{ $labels.gpu }}"
+
+      # Slow inference latency
+      - alert: SlowInferenceLatency
+        expr: histogram_quantile(0.95, rate(inference_latency_seconds_bucket[5m])) > 5.0
+        for: 5m
+        labels:
+          severity: warning
+          service: inference
+        annotations:
+          summary: "Slow inference latency detected"
+          description: "P95 inference latency is {{ $value | printf \"%.2f\" }}s (threshold: 5s)"
+
+  - name: medical_ai_system_health
+    rules:
+      # Service down alert
+      - alert: InferenceServiceDown
+        expr: up{job="inference-service"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: inference
+        annotations:
+          summary: "Inference service is down"
+          description: "Inference service has been down for 2 minutes"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is {{ $value | printf \"%.1f\" }}%"
+
+      # Database connection issues
+      - alert: DatabaseConnectionIssues
+        expr: pg_stat_activity_count{state="idle"} / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database connection usage"
+          description: "Database connections at {{ $value | printf \"%.1f\" }}% capacity"
+
+      # Redis memory usage
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: cache
+        annotations:
+          summary: "Redis memory usage high"
+          description: "Redis memory usage is {{ $value | printf \"%.1f\" }}%"
+
+  - name: medical_ai_business_metrics
+    rules:
+      # High risk predictions spike
+      - alert: HighRiskPredictionSpike
+        expr: increase(inference_requests_total{risk_level="HIGH"}[1h]) > 50
+        for: 10m
+        labels:
+          severity: info
+          service: clinical
+        annotations:
+          summary: "Spike in high-risk predictions"
+          description: "{{ $value }} high-risk predictions in the last hour"
+
+      # Low physician agreement
+      - alert: LowPhysicianAgreement
+        expr: physician_agreement_rate < 0.8
+        for: 1h
+        labels:
+          severity: warning
+          service: clinical
+        annotations:
+          summary: "Low physician agreement rate"
+          description: "Physician agreement rate is {{ $value | printf \"%.2f\" }}% (threshold: 80%)"
+
+      # Model performance degradation
+      - alert: ModelPerformanceDegradation
+        expr: (model_auc - model_auc offset 24h) < -0.05
+        for: 1h
+        labels:
+          severity: critical
+          service: ml
+        annotations:
+          summary: "Model performance degradation detected"
+          description: "AUC decreased by {{ $value | printf \"%.3f\" }} in 24 hours"
+
+  - name: medical_ai_security
+    rules:
+      # Failed authentication attempts
+      - alert: HighFailedAuthAttempts
+        expr: increase(auth_failed_attempts_total[15m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "High number of failed authentication attempts"
+          description: "{{ $value }} failed auth attempts in 15 minutes"
+
+      # Unusual access patterns
+      - alert: UnusualDataAccess
+        expr: rate(audit_log_access_total{unusual="true"}[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: security
+        annotations:
+          summary: "Unusual data access patterns detected"
+          description: "{{ $value }} unusual access events per minute"
+
+      # PHI exposure risk
+      - alert: PHIDataExposure
+        expr: increase(phi_exposure_incidents_total[1h]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: compliance
+        annotations:
+          summary: "PHI data exposure incident detected"
+          description: "PHI exposure incident occurred - immediate investigation required"

@@ -1,0 +1,392 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-service
+  namespace: medical-ai
+  labels:
+    app: inference-service
+    component: ai-service
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: inference-service
+  template:
+    metadata:
+      labels:
+        app: inference-service
+        component: ai-service
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: medical-ai-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: inference
+        image: medicalai/inference-service:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: MODEL_CACHE_SIZE
+          value: "3"
+        - name: INFERENCE_BATCH_SIZE
+          value: "16"
+        - name: MIXED_PRECISION
+          value: "true"
+        - name: ALLOWED_ORIGINS
+          value: "https://clinical-dashboard.medical-ai.com,https://admin.medical-ai.com"
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: connection-string
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: connection-string
+        - name: S3_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: endpoint
+        - name: S3_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: access-key
+        - name: S3_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: secret-key
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: encryption-keys
+              key: medical-data-key
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: jwt-keys
+              key: secret-key
+        - name: HIGH_RISK_THRESHOLD
+          value: "0.9"
+        - name: MEDIUM_RISK_THRESHOLD
+          value: "0.7"
+        - name: LOW_RISK_THRESHOLD
+          value: "0.5"
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "2"
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: models
+          mountPath: /app/models
+          readOnly: true
+        - name: shared-memory
+          mountPath: /dev/shm
+        - name: tmp-storage
+          mountPath: /tmp
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTPS  # Use HTTPS in production
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+          successThreshold: 1
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 6
+          successThreshold: 1
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+          readOnly: true
+      - name: shared-memory
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+      - name: tmp-storage
+        emptyDir:
+          sizeLimit: 1Gi
+      nodeSelector:
+        accelerator: nvidia-tesla-t4
+        zone: us-central1-a  # Prefer specific zone for data locality
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "medical-ai"
+        operator: "Equal"
+        value: "inference"
+        effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: accelerator
+                operator: In
+                values:
+                - nvidia-tesla-t4
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 50
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - inference-service
+              topologyKey: kubernetes.io/hostname
+      priorityClassName: medical-ai-high-priority
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-service
+  namespace: medical-ai
+  labels:
+    app: inference-service
+    component: ai-service
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
+  - name: metrics
+    port: 9090
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: inference-service
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: inference-service-ingress
+  namespace: medical-ai
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    external-dns.alpha.kubernetes.io/hostname: "inference.medical-ai.com"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - inference.medical-ai.com
+    secretName: inference-tls
+  rules:
+  - host: inference.medical-ai.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: inference-service
+            port:
+              number: 80
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-config
+  namespace: medical-ai
+data:
+  config.yaml: |
+    # Medical AI Configuration
+    model:
+      backbone: "resnet50"
+      input_size: [224, 224]
+      num_classes: 2
+
+    data:
+      normalization_mean: [0.485, 0.456, 0.406]
+      normalization_std: [0.229, 0.224, 0.225]
+
+    cancer_types:
+      - name: "lung"
+        classes: ["benign", "malignant"]
+      - name: "breast"
+        classes: ["benign", "malignant"]
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-keys
+  namespace: medical-ai
+type: Opaque
+data:
+  # Base64 encoded JWT secret key
+  secret-key: "WW91ciBKV1QgU2VjcmV0IEtleSBIZXJl"  # Replace with actual key
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: encryption-keys
+  namespace: medical-ai
+type: Opaque
+data:
+  # Base64 encoded encryption key for medical data
+  medical-data-key: "RW5jcnlwdGlvbiBLZXkgZm9yIE1lZGljYWwgRGF0YQ=="  # Replace with actual key
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inference-hpa
+  namespace: medical-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inference-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: nvidia.com/gpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: Pods
+    pods:
+      metric:
+        name: inference_requests_total
+      target:
+        type: AverageValue
+        averageValue: "50"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 2
+        periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+      selectPolicy: Min
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inference-pdb
+  namespace: medical-ai
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: inference-service
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: medical-ai-service-account
+  namespace: medical-ai
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: medical-ai-inference-role
+  namespace: medical-ai
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: medical-ai-inference-binding
+  namespace: medical-ai
+subjects:
+- kind: ServiceAccount
+  name: medical-ai-service-account
+  namespace: medical-ai
+roleRef:
+  kind: Role
+  name: medical-ai-inference-role
+  apiGroup: rbac.authorization.k8s.io

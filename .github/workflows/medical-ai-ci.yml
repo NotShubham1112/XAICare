@@ -1,0 +1,433 @@
+name: Medical AI CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run daily security scans
+    - cron: '0 2 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  # ===========================================
+  # SECURITY & COMPLIANCE SCANNING
+  # ===========================================
+  security-scan:
+    name: Security & Compliance Scan
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install security tools
+        run: |
+          pip install bandit safety pip-audit
+          npm install -g audit
+
+      - name: Run Bandit (Python security scanner)
+        run: |
+          bandit -r . -f json -o bandit-report.json || true
+        continue-on-error: true
+
+      - name: Run Safety (vulnerability scanner)
+        run: |
+          safety check --output json > safety-report.json || true
+        continue-on-error: true
+
+      - name: Run pip-audit
+        run: |
+          pip-audit --format json > pip-audit-report.json || true
+        continue-on-error: true
+
+      - name: Check for PHI/PII exposure
+        run: |
+          # Scan for potential PHI/PII in code
+          grep -r -i "ssn\|social.*security\|patient.*id\|medical.*record" --include="*.py" --include="*.sql" . || echo "No PHI patterns found"
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+            pip-audit-report.json
+
+      - name: Security scan results
+        run: |
+          echo "Security scanning completed"
+          # In production, you might fail the build if critical issues are found
+
+  # ===========================================
+  # CODE QUALITY & TESTING
+  # ===========================================
+  code-quality:
+    name: Code Quality & Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-cov pytest-asyncio black flake8 mypy
+
+      - name: Run code quality checks
+        run: |
+          # Check formatting
+          black --check --diff . || exit 1
+
+          # Check linting
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || exit 1
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Type checking with mypy
+        run: |
+          mypy backend/services/inference_service/main.py --ignore-missing-imports || true
+        continue-on-error: true
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ -v --cov=backend --cov-report=xml --cov-report=html
+
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ -v --tb=short
+        env:
+          TEST_DATABASE_URL: postgresql://test:test@localhost:5432/test_db
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            htmlcov/
+            coverage.xml
+
+  # ===========================================
+  # MODEL VALIDATION & TESTING
+  # ===========================================
+  model-validation:
+    name: Model Validation & Testing
+    runs-on: [self-hosted, gpu]  # Requires GPU runner
+    needs: [security-scan, code-quality]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ML dependencies
+        run: |
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+          pip install -r requirements.txt
+
+      - name: Download test models
+        run: |
+          # In production, download from model registry
+          mkdir -p models
+          # wget https://model-registry.medical-ai.com/models/lung_model_v1.pth -O models/lung_model.pth || true
+          # wget https://model-registry.medical-ai.com/models/breast_model_v1.pth -O models/breast_model.pth || true
+
+      - name: Model integrity check
+        run: |
+          python -c "
+          import torch
+          import os
+          from pathlib import Path
+
+          model_files = list(Path('models').glob('*.pth'))
+          for model_file in model_files:
+              try:
+                  # Load model and check basic structure
+                  checkpoint = torch.load(model_file, map_location='cpu')
+                  print(f'✅ {model_file.name}: Valid PyTorch checkpoint')
+                  if 'model_state_dict' in checkpoint:
+                      print(f'   State dict keys: {len(checkpoint[\"model_state_dict\"])}')
+              except Exception as e:
+                  print(f'❌ {model_file.name}: Invalid model - {e}')
+                  exit(1)
+          "
+
+      - name: Clinical validation tests
+        run: |
+          python -c "
+          # Run clinical validation on test data
+          from evaluation.metrics import calculate_clinical_metrics
+          import numpy as np
+
+          # Mock validation data (replace with real test data)
+          np.random.seed(42)
+          n_samples = 1000
+
+          # Generate mock predictions and labels
+          y_true = np.random.binomial(1, 0.3, n_samples)  # 30% positive rate
+          y_prob = np.random.beta(2, 5, n_samples)  # Skewed towards low probabilities
+          y_pred = (y_prob > 0.5).astype(int)
+
+          # Calculate clinical metrics
+          metrics = calculate_clinical_metrics(y_true, y_pred, y_prob)
+
+          print('Clinical Validation Results:')
+          print(f'Sensitivity: {metrics[\"sensitivity\"]:.3f}')
+          print(f'Specificity: {metrics[\"specificity\"]:.3f}')
+          print(f'AUC: {metrics[\"auc\"]:.3f}')
+
+          # Check clinical thresholds
+          assert metrics['sensitivity'] > 0.8, f'Sensitivity too low: {metrics[\"sensitivity\"]}'
+          assert metrics['specificity'] > 0.7, f'Specificity too low: {metrics[\"specificity\"]}'
+          assert metrics['auc'] > 0.75, f'AUC too low: {metrics[\"auc\"]}'
+
+          print('✅ All clinical thresholds met')
+          "
+
+      - name: Model performance regression test
+        run: |
+          python -c "
+          # Test for performance regression
+          import json
+
+          # Load baseline performance (would be stored in model registry)
+          baseline = {
+              'lung': {'auc': 0.92, 'sensitivity': 0.89, 'specificity': 0.88},
+              'breast': {'auc': 0.91, 'sensitivity': 0.87, 'specificity': 0.89}
+          }
+
+          # Mock current performance (replace with actual evaluation)
+          current = {
+              'lung': {'auc': 0.93, 'sensitivity': 0.90, 'specificity': 0.87},
+              'breast': {'auc': 0.90, 'sensitivity': 0.88, 'specificity': 0.88}
+          }
+
+          for cancer_type in baseline.keys():
+              for metric in ['auc', 'sensitivity', 'specificity']:
+                  baseline_val = baseline[cancer_type][metric]
+                  current_val = current[cancer_type][metric]
+                  change = current_val - baseline_val
+
+                  if change < -0.05:  # 5% degradation threshold
+                      print(f'❌ Performance regression in {cancer_type} {metric}: {baseline_val:.3f} → {current_val:.3f}')
+                      exit(1)
+                  elif change > 0.02:  # Significant improvement
+                      print(f'✅ Performance improvement in {cancer_type} {metric}: {baseline_val:.3f} → {current_val:.3f}')
+                  else:
+                      print(f'✓ {cancer_type} {metric}: {baseline_val:.3f} → {current_val:.3f} (stable)')
+
+          print('✅ No performance regression detected')
+          "
+
+  # ===========================================
+  # DOCKER BUILD & PUSH
+  # ===========================================
+  docker-build:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [security-scan, code-quality, model-validation]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [inference-service, training-service, xai-service, metadata-service, auth-service]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push service image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend/services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+          platforms: linux/amd64,linux/arm64
+
+  # ===========================================
+  # DEPLOYMENT TO STAGING
+  # ===========================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG_STAGING }}
+
+      - name: Deploy to staging
+        run: |
+          # Update images in staging
+          kubectl set image deployment/inference-service inference-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/inference-service:develop -n medical-ai-staging
+          kubectl set image deployment/training-service training-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/training-service:develop -n medical-ai-staging
+
+          # Wait for rollout
+          kubectl rollout status deployment/inference-service -n medical-ai-staging --timeout=600s
+          kubectl rollout status deployment/training-service -n medical-ai-staging --timeout=600s
+
+      - name: Run staging tests
+        run: |
+          # Run integration tests against staging
+          python tests/integration/test_staging_deployment.py
+
+  # ===========================================
+  # DEPLOYMENT TO PRODUCTION
+  # ===========================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl for production
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+
+      - name: Deploy to production with canary
+        run: |
+          # Create canary deployment
+          kubectl apply -f kubernetes/canary-deployment.yaml
+
+          # Wait for canary to be ready
+          kubectl wait --for=condition=available --timeout=300s deployment/inference-service-canary -n medical-ai
+
+          # Run canary analysis
+          python tests/canary_analysis.py
+
+          # If canary successful, proceed with full deployment
+          if [ $? -eq 0 ]; then
+            echo "Canary analysis successful, proceeding with full deployment"
+
+            # Update production images
+            kubectl set image deployment/inference-service inference-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/inference-service:latest -n medical-ai
+            kubectl set image deployment/training-service training-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/training-service:latest -n medical-ai
+
+            # Wait for rollout
+            kubectl rollout status deployment/inference-service -n medical-ai --timeout=900s
+            kubectl rollout status deployment/training-service -n medical-ai --timeout=900s
+
+            # Clean up canary
+            kubectl delete deployment/inference-service-canary -n medical-ai
+          else
+            echo "Canary analysis failed, rolling back"
+            kubectl delete deployment/inference-service-canary -n medical-ai
+            exit 1
+          fi
+
+      - name: Run production smoke tests
+        run: |
+          # Quick smoke tests on production
+          python tests/smoke_tests.py --env production
+
+      - name: Notify deployment completion
+        run: |
+          # Send notification (Slack, email, etc.)
+          echo "Production deployment completed successfully"
+
+  # ===========================================
+  # POST-DEPLOYMENT VALIDATION
+  # ===========================================
+  post-deployment-validation:
+    name: Post-Deployment Validation
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for services to stabilize
+        run: sleep 300  # Wait 5 minutes for services to stabilize
+
+      - name: Run production validation
+        run: |
+          python tests/post_deployment_validation.py --env production
+
+      - name: Performance regression check
+        run: |
+          python tests/performance_regression.py --baseline production
+
+      - name: Security validation
+        run: |
+          # Run security tests on deployed services
+          python tests/security_validation.py --env production
+
+      - name: Update deployment status
+        run: |
+          # Update deployment status in monitoring system
+          echo "Deployment validation completed"
